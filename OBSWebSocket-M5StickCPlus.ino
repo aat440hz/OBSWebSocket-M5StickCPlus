@@ -19,18 +19,17 @@ bool isStreaming = false;
 bool obsConnected = false;
 unsigned long lastStatusUpdate = 0;
 const unsigned long STATUS_INTERVAL = 5000;
+const unsigned long CONNECT_TIMEOUT = 30000; // 30 seconds timeout
 
 void updateDisplay() {
   M5.Lcd.fillScreen(BLACK);
   M5.Lcd.setCursor(0, 0);
-  
-  // Using larger text, we might need to adjust layout
   M5.Lcd.printf("WiFi:%s OBS:%s\n", 
     WiFi.status() == WL_CONNECTED ? "OK" : "NO",
     obsConnected ? "OK" : "NO");
-  M5.Lcd.setCursor(0, 20);  // Move down for next line
+  M5.Lcd.setCursor(0, 20);
   M5.Lcd.printf("Stream:%s\n", isStreaming ? "ON" : "OFF");
-  M5.Lcd.setCursor(0, 40);  // Move down again
+  M5.Lcd.setCursor(0, 40);
   M5.Lcd.printf("Scene:%s\n", currentSceneName.c_str());
 }
 
@@ -43,10 +42,7 @@ void connectToWiFi() {
   Serial.println("Connected to WiFi");
 }
 
-void handleHelloMessage(const JsonDocument& doc) {
-  obsConnected = true;
-  updateDisplay();
-
+void sendAuthMessage(const JsonDocument& doc) {
   if (doc["d"].containsKey("authentication")) {
     const char* challenge = doc["d"]["authentication"]["challenge"].as<const char*>();
     const char* salt = doc["d"]["authentication"]["salt"].as<const char*>();
@@ -86,7 +82,8 @@ void handleHelloMessage(const JsonDocument& doc) {
     String output;
     serializeJson(authDoc, output);
     webSocket.send(output);
-    
+  } else {
+    obsConnected = true;
     fetchStreamStatus();
     fetchCurrentScene();
   }
@@ -135,9 +132,14 @@ void onMessageCallback(WebsocketsMessage message) {
   }
 
   int op = doc["op"].as<int>();
-  if (op == 0) {
-    handleHelloMessage(doc);
-  } else if (op == 7) {
+  if (op == 0) { // Hello message
+    sendAuthMessage(doc);
+  } else if (op == 2) { // Identified (auth successful)
+    obsConnected = true;
+    updateDisplay();
+    fetchStreamStatus();
+    fetchCurrentScene();
+  } else if (op == 7) { // Request response
     String requestType = doc["d"]["requestType"].as<String>();
 
     if (requestType == "GetSceneList") {
@@ -178,12 +180,31 @@ void onMessageCallback(WebsocketsMessage message) {
 void setup() {
   M5.begin();
   M5.Lcd.setRotation(1);
-  M5.Lcd.setTextSize(2);  // Increase text size (default is 1, 2 doubles it)
+  M5.Lcd.setTextSize(2);
   connectToWiFi();
   updateDisplay();
 
   webSocket.onMessage(onMessageCallback);
-  webSocket.connect("ws://" + String(obsHost) + ":" + String(obsPort));
+  
+  // Manual connection with timeout
+  unsigned long startTime = millis();
+  String wsUrl = "ws://" + String(obsHost) + ":" + String(obsPort);
+  Serial.println("Connecting to OBS WebSocket...");
+  webSocket.connect(wsUrl);
+  
+  while (!obsConnected && (millis() - startTime < CONNECT_TIMEOUT)) {
+    webSocket.poll(); // Process messages to complete connection
+    delay(100);       // Small delay to avoid overwhelming the CPU
+  }
+  
+  if (!obsConnected) {
+    Serial.println("Failed to connect to OBS within timeout");
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.println("OBS Timeout");
+  } else {
+    Serial.println("Connected to OBS WebSocket");
+  }
 }
 
 void loop() {
