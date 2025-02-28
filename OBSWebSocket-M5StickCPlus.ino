@@ -14,21 +14,24 @@ const int obsPort = 4455;
 const char* obsPassword = "YOUR_OBS_WEBSOCKET_PASSWORD";
 
 WebsocketsClient webSocket;
-int currentScene = 0;
+String currentSceneName = "Unknown";
+bool isStreaming = false;
 bool obsConnected = false;
+unsigned long lastStatusUpdate = 0;
+const unsigned long STATUS_INTERVAL = 5000;
 
-void updateDisplay(const String& wifiStatus, const String& obsStatus, const String& streamStatus, const String& sceneName) {
+void updateDisplay() {
   M5.Lcd.fillScreen(BLACK);
   M5.Lcd.setCursor(0, 0);
-
-  // Top line: WiFi and OBS status
-  M5.Lcd.printf("WiFi:%s OBS:%s\n", wifiStatus.c_str(), obsStatus.c_str());
-
-  // Second line: Streaming status
-  M5.Lcd.printf("Stream: %s\n", streamStatus.c_str());
-
-  // Third line: Current scene
-  M5.Lcd.printf("Scene: %s\n", sceneName.c_str());
+  
+  // Using larger text, we might need to adjust layout
+  M5.Lcd.printf("WiFi:%s OBS:%s\n", 
+    WiFi.status() == WL_CONNECTED ? "OK" : "NO",
+    obsConnected ? "OK" : "NO");
+  M5.Lcd.setCursor(0, 20);  // Move down for next line
+  M5.Lcd.printf("Stream:%s\n", isStreaming ? "ON" : "OFF");
+  M5.Lcd.setCursor(0, 40);  // Move down again
+  M5.Lcd.printf("Scene:%s\n", currentSceneName.c_str());
 }
 
 void connectToWiFi() {
@@ -42,7 +45,7 @@ void connectToWiFi() {
 
 void handleHelloMessage(const JsonDocument& doc) {
   obsConnected = true;
-  updateDisplay("OK", "OK", "...", "...");
+  updateDisplay();
 
   if (doc["d"].containsKey("authentication")) {
     const char* challenge = doc["d"]["authentication"]["challenge"].as<const char*>();
@@ -83,6 +86,9 @@ void handleHelloMessage(const JsonDocument& doc) {
     String output;
     serializeJson(authDoc, output);
     webSocket.send(output);
+    
+    fetchStreamStatus();
+    fetchCurrentScene();
   }
 }
 
@@ -98,14 +104,19 @@ void sendCommand(const char* requestType, const JsonDocument& payload) {
   webSocket.send(output);
 }
 
-void switchScene() {
+void fetchCurrentScene() {
   DynamicJsonDocument data(1024);
-  sendCommand("GetSceneList", data);
+  sendCommand("GetCurrentProgramScene", data);
 }
 
 void fetchStreamStatus() {
   DynamicJsonDocument data(1024);
   sendCommand("GetStreamStatus", data);
+}
+
+void switchScene() {
+  DynamicJsonDocument data(1024);
+  sendCommand("GetSceneList", data);
 }
 
 void toggleStreaming() {
@@ -126,7 +137,7 @@ void onMessageCallback(WebsocketsMessage message) {
   int op = doc["op"].as<int>();
   if (op == 0) {
     handleHelloMessage(doc);
-  } else if (op == 7) { // OBS request response
+  } else if (op == 7) {
     String requestType = doc["d"]["requestType"].as<String>();
 
     if (requestType == "GetSceneList") {
@@ -134,18 +145,32 @@ void onMessageCallback(WebsocketsMessage message) {
       int sceneCount = scenes.size();
       if (sceneCount == 0) return;
 
-      currentScene = (currentScene + 1) % sceneCount;
-      String nextScene = scenes[currentScene]["sceneName"].as<String>();
-
+      int currentIndex = -1;
+      for (int i = 0; i < sceneCount; i++) {
+        if (scenes[i]["sceneName"] == currentSceneName) {
+          currentIndex = i;
+          break;
+        }
+      }
+      
+      int nextIndex = (currentIndex + 1) % sceneCount;
+      String nextScene = scenes[nextIndex]["sceneName"].as<String>();
+      
       DynamicJsonDocument data(1024);
       data["sceneName"] = nextScene;
       sendCommand("SetCurrentProgramScene", data);
-
-      updateDisplay("OK", "OK", "...", nextScene);
     }
     else if (requestType == "GetStreamStatus") {
-      bool isStreaming = doc["d"]["responseData"]["outputActive"].as<bool>();
-      updateDisplay("OK", "OK", isStreaming ? "ON" : "OFF", "...");
+      isStreaming = doc["d"]["responseData"]["outputActive"].as<bool>();
+      updateDisplay();
+    }
+    else if (requestType == "GetCurrentProgramScene") {
+      currentSceneName = doc["d"]["responseData"]["currentProgramSceneName"].as<String>();
+      updateDisplay();
+    }
+    else if (requestType == "SetCurrentProgramScene") {
+      currentSceneName = doc["d"]["requestData"]["sceneName"].as<String>();
+      updateDisplay();
     }
   }
 }
@@ -153,10 +178,9 @@ void onMessageCallback(WebsocketsMessage message) {
 void setup() {
   M5.begin();
   M5.Lcd.setRotation(1);
+  M5.Lcd.setTextSize(2);  // Increase text size (default is 1, 2 doubles it)
   connectToWiFi();
-
-  // Initial display setup
-  updateDisplay(WiFi.status() == WL_CONNECTED ? "OK" : "NO", "NO", "...", "Loading...");
+  updateDisplay();
 
   webSocket.onMessage(onMessageCallback);
   webSocket.connect("ws://" + String(obsHost) + ":" + String(obsPort));
@@ -165,6 +189,12 @@ void setup() {
 void loop() {
   webSocket.poll();
   M5.update();
+
+  if (obsConnected && millis() - lastStatusUpdate >= STATUS_INTERVAL) {
+    fetchStreamStatus();
+    fetchCurrentScene();
+    lastStatusUpdate = millis();
+  }
 
   if (M5.BtnA.wasPressed()) {
     toggleStreaming();
